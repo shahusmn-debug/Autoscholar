@@ -1,0 +1,119 @@
+syntax and gemini settings
+
+model_provider: "google_genai"
+
+models:
+  text: "gemini-3-pro-preview"
+  vision: "gemini-3-pro-preview"
+
+google_genai:
+  api_version_text: "v1beta"
+  api_version_vision: "v1alpha"   # only if you want media_resolution control
+  use_files_api_for_pdfs: true
+
+generation:
+  writer:
+    thinking_level: "high"
+  analyst:
+    thinking_level: "high"
+  reviewer:
+    thinking_level: "low"         
+  ingestion:
+    thinking_level: "high"
+    pdf_media_resolution: "media_resolution_medium"
+    image_media_resolution: "media_resolution_high"
+
+# src/client.py
+import os, json, base64, mimetypes
+from typing import Any, Optional, Dict, List
+from google import genai
+from google.genai import types
+
+class GeminiLLMClient:
+    def __init__(self, model_text: str, model_vision: str,
+                 api_version_text: str = "v1beta",
+                 api_version_vision: str = "v1alpha"):
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not api_key and not os.getenv("GOOGLE_GENAI_USE_VERTEXAI"):
+            raise RuntimeError("Missing GEMINI_API_KEY/GOOGLE_API_KEY (or Vertex AI env vars).")
+
+        self.client_text = genai.Client(api_key=api_key, http_options={"api_version": api_version_text})
+        self.client_vision = genai.Client(api_key=api_key, http_options={"api_version": api_version_vision})
+        self.model_text = model_text
+        self.model_vision = model_vision
+
+    def call_text(self, system_prompt: str, user_text: str,
+                  thinking_level: str = "high",
+                  response_schema: Optional[Dict[str, Any]] = None) -> str:
+        cfg = types.GenerateContentConfig(
+            # system_instruction is the cleanest way to preserve your "system_prompt" contract
+            system_instruction=system_prompt,
+            thinking_config=types.ThinkingConfig(thinking_level=thinking_level),
+        )
+        if response_schema is not None:
+            cfg.response_mime_type = "application/json"
+            cfg.response_schema = response_schema
+
+        resp = self.client_text.models.generate_content(
+            model=self.model_text,
+            contents=user_text,
+            config=cfg,
+        )
+        return resp.text
+
+    def call_images(self, system_prompt: str, user_text: str, image_paths: List[str],
+                    thinking_level: str = "high",
+                    media_resolution_level: Optional[str] = None,
+                    response_schema: Optional[Dict[str, Any]] = None) -> str:
+        parts = [types.Part(text=user_text)]
+
+        for p in image_paths:
+            mime, _ = mimetypes.guess_type(p)
+            if not mime:
+                mime = "image/png"
+            data = open(p, "rb").read()
+            blob = types.Blob(mime_type=mime, data=data)
+            part_kwargs = {"inline_data": blob}
+            if media_resolution_level:
+                # v1alpha-only per Gemini 3 guide
+                part_kwargs["media_resolution"] = {"level": media_resolution_level}
+            parts.append(types.Part(**part_kwargs))
+
+        cfg = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            thinking_config=types.ThinkingConfig(thinking_level=thinking_level),
+        )
+        if response_schema is not None:
+            cfg.response_mime_type = "application/json"
+            cfg.response_schema = response_schema
+
+        resp = self.client_vision.models.generate_content(
+            model=self.model_vision,
+            contents=[types.Content(parts=parts)],
+            config=cfg,
+        )
+        return resp.text
+
+    def upload_file(self, path: str):
+        # Files API: upload and pass the returned handle into contents
+        return self.client_text.files.upload(file=path)
+
+    def call_pdf_via_files_api(self, system_prompt: str, user_text: str, pdf_path: str,
+                              thinking_level: str = "high",
+                              response_schema: Optional[Dict[str, Any]] = None) -> str:
+        uploaded = self.upload_file(pdf_path)
+
+        cfg = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            thinking_config=types.ThinkingConfig(thinking_level=thinking_level),
+        )
+        if response_schema is not None:
+            cfg.response_mime_type = "application/json"
+            cfg.response_schema = response_schema
+
+        resp = self.client_text.models.generate_content(
+            model=self.model_text,
+            contents=[uploaded, user_text],
+            config=cfg,
+        )
+        return resp.text

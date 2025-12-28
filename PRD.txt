@@ -1,0 +1,264 @@
+# Product Requirement Document AutoScholar-MVP (Gemini 3.0 Pro–Only)
+
+## 1. System Overview
+
+AutoScholar-MVP is a CLI-based Autonomous Research Agent. It ingests segregated streams of raw data and academic literature to author publication-quality scientific papers. It supports two modes Creation Mode (generating from scratch) and Refinement Mode (optimizing human-written drafts).
+
+Core Differentiators
+
+   Dual-Path Reference Ingestion Uses a Vision-First pipeline for PDFs via Gemini’s native PDFdocument ingestion (Files API) to avoid OCR errors, while offering a streamlined text pipeline for .txt and .md notes.
+   Hybrid Workflow (Refinement Mode) The ability to ingest a user-provided Markdown draft (`draft.md`), grade it against raw data ground truth, and enter the improvement loop at the Review stage.
+   The Visualizer A Make-then-Look Analyst agent that writes Python code to generate charts, then uses Vision to interpret those charts for the writer.
+   Orchestration Cyclic State Graph (LangGraph).
+   Quality Standard Strict acceptance criteria (Score  9.510) with a mandatory minimum of 2 iterations.
+   Real-Time Progress Tracking (CLI Visualization) A live, continuously updating progress display that reports which pipeline stage is running (Ingestion  Analyst  Writer  Reviewer).
+
+## 2. Directory & Artifact Structure
+
+The system relies on a rigid file structure for input routing and output logging.
+
+```text
+AutoScholar-MVP
+├── main.py                       # Application Entry Point (Handles --mode refine)
+├── .env                          # API Credentials
+├── config.yaml                   # Gemini model config & Thinking Levels
+├── inputs                       # [USER INPUT]
+│   ├── user_draft               # [NEW] Place existing papers here for refinement
+│   │   └── draft.md              # User's source text
+│   ├── raw_data                 # CSVs, TXT logs, PNGJPG data images
+│   └── references               # PDF Papers, TXTMD Notes
+├── src
+│   ├── ... (standard modules client, ingestion, tools, graph, state, agents, utils)
+│   └── progress.py               # Live CLI Progress + Event Appender
+├── runs                         # [SYSTEM OUTPUT]
+│   ├── Job_{Timestamp}
+│   │   ├── run.log               # The Human View (Plain text narrative)
+│   │   ├── events.jsonl          # The Machine View (Superset of all data)
+│   │   ├── 00_Knowledge_Base
+│   │   │   ├── evidence_notes.json
+│   │   │   └── analysis_report.md
+│   │   ├── figures              # Generated .png files
+│   │   ├── tables               # Generated .md tables
+│   │   ├── 01_Introduction
+│   │   │   ├── iter_0           # [NEW] The original user draft (if Refinement Mode)
+│   │   │   ├── iter_1
+│   │   │   │   ├── draft.md
+│   │   │   │   └── critique.md
+│   │   ├── state.sqlite          # Resume Checkpoint
+│   │   ├── FINAL_PAPER.md
+│   │   ├── transcripts          # Debug Raw LLM IO
+│   │   │   ├── ingestion_{ref_id}.json
+│   │   │   └── ...
+│   │   └── tools                # Debug Generated Code artifacts
+│   │       ├── fig_{n}_attempt_{k}.py
+│   │       └── fig_{n}_attempt_{k}.stdout.txt
+```
+
+Rule Logs (`run.log` and `events.jsonl`) are written to disk regardless of successfailure. A crashed run must still preserve these files.
+
+## 3. Data Schema & State Management
+
+### 3.1 The Artifact Schemas
+
+(Unchanged `EvidenceItem`, `FigureItem`, `ReferenceItem`).
+
+### 3.2 The Global State (PaperState)
+
+The state dictionary remains the same, but the initialization logic changes based on the run mode.
+
+```python
+class PaperState(TypedDict)
+    # --- STATIC CONTEXT ---
+    knowledge_base Dict[str, ReferenceItem] 
+    analysis_context str                    
+    figure_manifest Dict[str, FigureItem]   
+
+    # --- PLANNING ---
+    section_queue List[str]                 
+    current_section str                     
+
+    # --- ITERATION MEMORY ---
+    current_draft str          # In Refine Mode, this starts populated with user text
+    current_iteration int      # In Refine Mode, this starts at 0
+    previous_score float
+    critique_history List[str]
+    
+    # --- METADATA ---
+    mode str                   # create or refine
+    
+    # --- SAFETY ---
+    best_draft_so_far str
+    best_score_so_far float
+    run_dir str
+```
+
+Note Real-time progress tracking is NOT stored in PaperState.
+
+## 4. Component Specification
+
+### 4.1 Module client.py (Gemini 3.0 Pro Wrapper)
+(Unchanged. Handles Fresh API calls, PDF Uploads via Files API, Structured Outputs, and High-Fidelity Vision).
+
+### 4.2 Module tools.py (The Python Sandbox)
+(Unchanged. Handles `matplotlib.use('Agg')` backend fix, Path Injection, and Strict Imports).
+
+### 4.3 Module ingestion.py (The Dual-Path Pipeline)
+(Unchanged. Handles Path A [PDFVision] and Path B [Text], and the Data Passport generation using `df.head(50)`).
+
+### 4.4 Module progress.py (Real-Time CLI Progress + Consolidated Logging)
+
+Goal Provide real-time visualization and a simplified, unified logging strategy.
+
+Functions
+   `start_progress(run_dir)`
+   `log_event(level, stage, message, metadata={})` - Writes to both `run.log` and `events.jsonl`.
+   `update_display(stage, detail)` - Updates live CLI spinner.
+
+## 4.X Consolidated Logging Structure (MVP)
+
+We replace complex multi-file logging with a simplified dual-file strategy.
+
+### 4.X.1 run.log (The Human View)
+   Format Plain text, time-ordered, one line per event.
+   Content High-level narrative of what the agent is doing.
+   Purpose Instant readability for the user to understand What happened
+   Example
+    ```text
+    [140001] INFO [Setup] Refinement Mode Active. Loaded user draft (2500 words).
+    [140005] INFO [Analyst] Generating Python code for Fig 1 (Attempt 1)...
+    [140522] INFO [Reviewer] Iteration 0 (User Draft) Score 7.2. Issues Data contradiction in Sec 3.
+    ```
+
+### 4.X.2 events.jsonl (The Machine View)
+   Format Strict Newline-delimited JSON.
+   Content A superset of ALL run data. This file serves as the single source of truth for debugging.
+   Constraint Do not pretty-print (must be valid JSONL).
+
+### 4.X.3 Artifact Retention
+   Transcripts Keep `transcripts` for raw LLM inputsoutputs.
+   Tool Code Keep `tools` to store the generated Python scripts (successful and failed attempts).
+
+## 5. The Agent Graph Logic (graph.py)
+
+State Immutability Constraint `knowledge_base` and `figure_manifest` are Read-Only for WriterReviewer.
+
+### 5.1 Node node_analyst (The Visualizer & Self-Correction)
+
+Type ReAct  Loop.
+Thinking Level High.
+
+Workflow
+1.  Ingest Reads the Data Passport (Metadata + `df.head(50)` sample).
+2.  Plan Identifies needed charts.
+3.  Code Loop (Robust Self-Correction)
+       Generate LLM writes Python code based on the sample.
+       Execute Run via `tools.py` against the full dataset on disk.
+       Verify & Fix (The Dirty Data Trap)
+           If `tools.py` returns `success` Proceed to Visual Analysis.
+           If `tools.py` returns `error` (STDERR)
+               Context The full dataset often contains dirty data (strings in float columns, nulls) not visible in the 50-row sample.
+               Action The Analyst MUST enter a self-correction sub-loop. It reads the specific Python error and rewrites the code to handle the exception (e.g., adding `coerce_numeric=True`).
+               Constraint Do NOT fail the run immediately. Attempt up to 3 fixes.
+4.  Visual Analysis Passes successful `fig_1.png` to Gemini Vision.
+5.  Output Populates `analysis_context` and `figure_manifest`.
+
+### 5.2 Node node_writer (The Hybrid AuthorEditor)
+
+Input `current_draft`, `critique_history`, `mode` (createrefine).
+
+Logic Branch
+
+A. If `mode == refine` AND `current_iteration == 1`
+   System Prompt (The Editor Persona) You are an expert Academic Editor. You have been given a draft text and a set of critique notes from the Reviewer. Your job is to refine the text.
+       Keep the original author's voice where possible.
+       CRITICAL Normalize all citations to match the keys in `knowledge_base` (e.g., change '(Smith 2023)' to '[Ref_Smith_2023]').
+       CRITICAL If the `analysis_context` (hard data) contradicts the text, CORRECT the text to match the data.
+       Address the critique {critique_history}.
+
+B. If `mode == create` OR `current_iteration  1`
+   System Prompt (The Author Persona) You are an academic author. WriteRewrite the section... Use `analysis_context` for factual claims...
+
+### 5.3 Node node_reviewer
+
+Logic
+   In Refinement Mode, the Reviewer runs immediately after IngestionAnalyst to score the User's Draft (Iter 0).
+   In Creation Mode, it runs after the Writer.
+
+System Prompt
+You are a critical, but fair and objective, peer reviewer. Grade this draft on a 0.0-10.0 scale. Return JSON {'score' float, 'feedback' str}.
+
+### 5.4 Conditional Edge router
+
+Logic
+   If `score = 9.5` Return NEXT_SECTION (or END).
+   If `i  2` Return RETRY (Mandatory Minimum).
+   If `i = 6` Return NEXT_SECTION (Hard Max).
+   If `score  previous_score` Return RETRY (Loop for perfection).
+
+## 6. Implementation Roadmap
+
+Phase 1 Infrastructure (Days 1-2)
+   Setup poetry, langgraph, google-genai.
+   Implement `main.py` arguments (`--mode refine`).
+   Implement `progress.py` with Consolidated Logging.
+   Implement `tools.py` with Agg backend.
+
+Phase 2 The Ingestion Engine (Days 3-4)
+   Implement Path A (PDFVision) and Path B (Text).
+   Implement `load_user_draft()` utility in `ingestion.py` to read `inputsuser_draftdraft.md`.
+
+Phase 3 The Visualizer (Days 5-6)
+   Build the Analyst Node.
+   Critical Implement the Self-Correction Sub-loop (Dirty Data Handler).
+
+Phase 4 The WriterReviewer Core (Days 7-9)
+   Implement Writer Node with Dual Personas (Editor vs. Author).
+   Implement Reviewer Node.
+   Wire the Router logic to handle the initial User Draft evaluation.
+
+Phase 5 Integration (Day 10)
+   Stitcher & Final Verification.
+
+## 7. Configuration Details (config.yaml)
+
+```yaml
+model_provider google_genai
+model_name gemini-3-pro-preview
+
+logging
+  human_log run.log
+  machine_log events.jsonl
+  save_transcripts true
+
+iteration_limits
+  min 2
+  max 6
+  score_threshold 9.5
+
+defaults
+  mode create # Default behavior unless --mode refine is passed
+```
+
+## 8. User Manual Execution Flow
+
+### Mode A Creation (From Scratch)
+1.  Drag `data.csv` into `inputsraw_data`.
+2.  Drag `papers.pdf` into `inputsreferences`.
+3.  Run `python main.py --topic Impact of X on Y`
+
+### Mode B Refinement (Edit My Paper)
+1.  Drag your existing paper into `inputsuser_draftdraft.md`.
+2.  Drag `data.csv` (optional, for fact-checking) into `inputsraw_data`.
+3.  Drag `papers.pdf` (your sources) into `inputsreferences`.
+4.  Run `python main.py --mode refine`
+
+System Action (Refinement)
+1.  Analyst Generates charts from CSV (Ground Truth).
+2.  Ingestion Reads PDFs to build Knowledge Base.
+3.  Reviewer (Iter 0) Reads `draft.md`. Compares it to Analyst's data and PDF evidence.
+       Log `[Reviewer] Score 6.5. Citation format incorrect. Data in para 2 contradicts actual CSV trends.`
+4.  Writer (Iter 1) Act as Editor. Fixes citations, corrects data errors, preserves your voice.
+5.  Loop Continues until Score  9.5.
+
+Output
+User opens `FINAL_PAPER.md`. Review `run.log` to see exactly what the Editor changed and why.

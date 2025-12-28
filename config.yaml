@@ -1,0 +1,44 @@
+# AutoScholar-MVP Configuration
+
+# Model Provider
+model_provider: "google_genai"
+
+# Model Names
+models:
+  text: "gemini-2.5-pro-preview-06-05"
+  vision: "gemini-2.5-pro-preview-06-05"
+
+# API Settings
+google_genai:
+  api_version_text: "v1beta"
+  api_version_vision: "v1alpha"
+  use_files_api_for_pdfs: true
+
+# Thinking Levels per Agent
+generation:
+  writer:
+    thinking_level: "high"
+  analyst:
+    thinking_level: "high"
+  reviewer:
+    thinking_level: "low"
+  ingestion:
+    thinking_level: "high"
+    pdf_media_resolution: "media_resolution_medium"
+    image_media_resolution: "media_resolution_high"
+
+# Logging Configuration
+logging:
+  human_log: "run.log"
+  machine_log: "events.jsonl"
+  save_transcripts: true
+
+# Iteration Limits
+iteration_limits:
+  min: 2
+  max: 6
+  score_threshold: 9.5
+
+# Default Mode
+defaults:
+  mode: "create"  # "create" or "refine"

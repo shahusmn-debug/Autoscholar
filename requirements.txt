@@ -1,0 +1,23 @@
+# AutoScholar-MVP Dependencies
+
+# Google Gemini AI SDK
+google-genai>=1.0.0
+
+# LangGraph for state machine orchestration
+langgraph>=0.2.0
+langchain-core>=0.3.0
+
+# Configuration
+pyyaml>=6.0
+
+# CLI and Progress Display
+rich>=13.0.0
+
+# Data Processing
+pandas>=2.0.0
+
+# Chart Generation
+matplotlib>=3.7.0
+
+# Environment Variables
+python-dotenv>=1.0.0
