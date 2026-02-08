@@ -3,10 +3,24 @@
 # Model Provider
 model_provider: "google_genai"
 
-# Model Names
+# =============================================================================
+# MODEL SELECTION - Easy toggle between models
+# =============================================================================
+# Available models (uncomment the one you want to use):
+#
+# Gemini 3 Series (Latest):
+#   - gemini-3-flash-preview    # Fast, good for most tasks (RECOMMENDED)
+#   - gemini-3-pro-preview      # Most capable, may have availability issues
+#
+# Gemini 2.5 Series:
+#   - gemini-2.5-flash          # Fast and reliable
+#   - gemini-2.5-pro            # More capable than flash
+#
+# =============================================================================
+
 models:
-  text: "gemini-2.5-pro-preview-06-05"
-  vision: "gemini-2.5-pro-preview-06-05"
+  text: "gemini-3-flash-preview"
+  vision: "gemini-3-flash-preview"
 
 # API Settings
 google_genai:
@@ -14,14 +28,25 @@ google_genai:
   api_version_vision: "v1alpha"
   use_files_api_for_pdfs: true
 
-# Thinking Levels per Agent
+# =============================================================================
+# THINKING LEVELS - Controls reasoning depth (Gemini 3 specific)
+# =============================================================================
+# Available levels:
+#   - "minimal"  : No thinking, fastest (Gemini 3 Flash only)
+#   - "low"      : Minimal reasoning, fast responses
+#   - "medium"   : Balanced (Gemini 3 Flash only)
+#   - "high"     : Maximum reasoning depth (default for Gemini 3)
+#
+# Note: For Gemini 2.5/1.5, thinking_level is ignored unless using thinking models.
+# =============================================================================
+
 generation:
   writer:
     thinking_level: "high"
   analyst:
     thinking_level: "high"
   reviewer:
-    thinking_level: "low"
+    thinking_level: "high"
   ingestion:
     thinking_level: "high"
     pdf_media_resolution: "media_resolution_medium"
@@ -35,9 +60,9 @@ logging:
 
 # Iteration Limits
 iteration_limits:
-  min: 2
-  max: 6
-  score_threshold: 9.5
+  min: 1
+  max: 4
+  score_threshold: 9.0
 
 # Default Mode
 defaults:

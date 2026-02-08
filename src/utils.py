@@ -53,13 +53,7 @@ def create_run_directory(base_dir: str = "runs") -> str:
         "figures",
         "tables",
         "transcripts",
-        "tools",
-        "01_Introduction",
-        "02_Literature_Review",
-        "03_Methodology",
-        "04_Results",
-        "05_Discussion",
-        "06_Conclusion"
+        "tools"
     ]
     
     for subdir in subdirs:
@@ -83,13 +77,14 @@ def get_section_dir(run_dir: str, section_name: str) -> str:
     Returns:
         Path to the section directory
     """
+    # Section map matches the order in state.py section_queue
     section_map = {
-        "Introduction": "01_Introduction",
-        "Literature Review": "02_Literature_Review",
-        "Methodology": "03_Methodology",
-        "Results": "04_Results",
-        "Discussion": "05_Discussion",
-        "Conclusion": "06_Conclusion"
+        "Methodology": "00_Methodology",
+        "Results": "01_Results",
+        "Discussion": "02_Discussion",
+        "Introduction": "03_Introduction",
+        "Literature Review": "04_Literature_Review",
+        "Conclusion": "05_Conclusion"
     }
     
     subdir = section_map.get(section_name, section_name.replace(" ", "_"))

@@ -53,6 +53,53 @@ Return your analysis as JSON with this schema:
 }"""
 
 
+# Batched extraction prompts - process multiple documents in one call
+BATCHED_PDF_EXTRACTION_PROMPT = """You are an expert academic research assistant.
+Analyze ALL of the attached PDF documents and extract key information from each.
+
+For EACH PDF document, extract:
+1. Title and authors
+2. Year of publication  
+3. A comprehensive summary (2-3 paragraphs)
+4. Key findings (as a list)
+5. Methodology overview
+
+Return your analysis as a JSON array with one object per PDF, in the same order they were provided:
+{
+    "documents": [
+        {
+            "title": "string",
+            "authors": "string", 
+            "year": "string",
+            "summary": "string",
+            "key_findings": ["string"],
+            "methodology": "string"
+        }
+    ]
+}"""
+
+
+BATCHED_TEXT_EXTRACTION_PROMPT = """You are an expert academic research assistant.
+Analyze ALL of the text documents below and extract key information from each.
+
+For EACH document section (marked with === headers), extract:
+1. Summary of main points
+2. Key findings
+3. Relevance notes
+
+Return your analysis as a JSON array with one object per document, in the same order they were provided:
+{
+    "documents": [
+        {
+            "filename": "string",
+            "summary": "string",
+            "key_findings": ["string"],
+            "relevance_notes": "string"
+        }
+    ]
+}"""
+
+
 def ingest_pdf(
     pdf_path: str,
     client: GeminiLLMClient,
@@ -216,14 +263,219 @@ def ingest_text(
         )
 
 
+def ingest_pdfs_batched(
+    pdf_paths: List[str],
+    client: GeminiLLMClient,
+    transcripts_dir: str,
+    thinking_level: str = "high"
+) -> Dict[str, ReferenceItem]:
+    """
+    Ingest multiple PDFs in a SINGLE API call to reduce request count.
+    
+    Args:
+        pdf_paths: List of paths to PDF files
+        client: Initialized GeminiLLMClient
+        transcripts_dir: Directory to save raw LLM transcripts
+        thinking_level: Chain-of-thought depth
+        
+    Returns:
+        Dict of ref_id → ReferenceItem for all PDFs
+    """
+    if not pdf_paths:
+        return {}
+    
+    update_display("Ingestion", f"Processing {len(pdf_paths)} PDFs (batched)...")
+    log_event("INFO", "Ingestion", f"Batched PDF ingestion: {len(pdf_paths)} files")
+    
+    # Build response schema for array of documents
+    response_schema = {
+        "type": "object",
+        "properties": {
+            "documents": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "authors": {"type": "string"},
+                        "year": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "key_findings": {"type": "array", "items": {"type": "string"}},
+                        "methodology": {"type": "string"}
+                    },
+                    "required": ["summary"]
+                }
+            }
+        },
+        "required": ["documents"]
+    }
+    
+    try:
+        # Single API call for all PDFs
+        response = client.call_multi_pdf_via_files_api(
+            system_prompt=BATCHED_PDF_EXTRACTION_PROMPT,
+            user_text=f"Extract information from these {len(pdf_paths)} academic papers.",
+            pdf_paths=pdf_paths,
+            thinking_level=thinking_level,
+            response_schema=response_schema
+        )
+        
+        data = json.loads(response)
+        documents = data.get("documents", [])
+        
+        # Build reference items
+        knowledge_base = {}
+        for i, (pdf_path, doc_data) in enumerate(zip(pdf_paths, documents), start=1):
+            ref_id = f"Ref_{i:03d}"
+            
+            ref_item = ReferenceItem(
+                ref_id=ref_id,
+                source_file=pdf_path,
+                title=doc_data.get("title"),
+                authors=doc_data.get("authors"),
+                year=doc_data.get("year"),
+                summary=doc_data.get("summary", ""),
+                key_findings=doc_data.get("key_findings", []),
+                methodology=doc_data.get("methodology")
+            )
+            knowledge_base[ref_id] = ref_item
+            log_event("INFO", "Ingestion", f"Extracted: {doc_data.get('title', Path(pdf_path).name)}")
+        
+        # Save transcript
+        transcript_path = Path(transcripts_dir) / "ingestion_pdfs_batched.json"
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(transcript_path, 'w', encoding='utf-8') as f:
+            json.dump({"input": pdf_paths, "output": data}, f, indent=2)
+        
+        return knowledge_base
+        
+    except Exception as e:
+        log_event("ERROR", "Ingestion", f"Batched PDF ingestion failed: {str(e)}")
+        # Fallback: process individually
+        log_event("INFO", "Ingestion", "Falling back to individual PDF processing")
+        knowledge_base = {}
+        for i, pdf_path in enumerate(pdf_paths, start=1):
+            ref_id = f"Ref_{i:03d}"
+            ref_item = ingest_pdf(pdf_path, client, ref_id, transcripts_dir, thinking_level)
+            knowledge_base[ref_id] = ref_item
+        return knowledge_base
+
+
+def ingest_texts_batched(
+    text_paths: List[str],
+    client: GeminiLLMClient,
+    transcripts_dir: str,
+    ref_start_id: int = 1,
+    thinking_level: str = "high"
+) -> Dict[str, ReferenceItem]:
+    """
+    Ingest multiple text files in a SINGLE API call to reduce request count.
+    
+    Args:
+        text_paths: List of paths to text/markdown files
+        client: Initialized GeminiLLMClient
+        transcripts_dir: Directory to save raw LLM transcripts
+        ref_start_id: Starting number for ref_id (continues from PDFs)
+        thinking_level: Chain-of-thought depth
+        
+    Returns:
+        Dict of ref_id → ReferenceItem for all text files
+    """
+    if not text_paths:
+        return {}
+    
+    update_display("Ingestion", f"Processing {len(text_paths)} text files (batched)...")
+    log_event("INFO", "Ingestion", f"Batched text ingestion: {len(text_paths)} files")
+    
+    # Concatenate all text files with headers
+    combined_content = []
+    for text_path in text_paths:
+        with open(text_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        filename = Path(text_path).name
+        combined_content.append(f"=== Document: {filename} ===\n{content}")
+    
+    full_text = "\n\n".join(combined_content)
+    
+    # Build response schema
+    response_schema = {
+        "type": "object",
+        "properties": {
+            "documents": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "filename": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "key_findings": {"type": "array", "items": {"type": "string"}},
+                        "relevance_notes": {"type": "string"}
+                    },
+                    "required": ["summary"]
+                }
+            }
+        },
+        "required": ["documents"]
+    }
+    
+    try:
+        # Single API call for all text files
+        response = client.call_text(
+            system_prompt=BATCHED_TEXT_EXTRACTION_PROMPT,
+            user_text=f"Analyze these {len(text_paths)} documents:\n\n{full_text}",
+            thinking_level=thinking_level,
+            response_schema=response_schema
+        )
+        
+        data = json.loads(response)
+        documents = data.get("documents", [])
+        
+        # Build reference items
+        knowledge_base = {}
+        for i, (text_path, doc_data) in enumerate(zip(text_paths, documents), start=ref_start_id):
+            ref_id = f"Ref_{i:03d}"
+            
+            ref_item = ReferenceItem(
+                ref_id=ref_id,
+                source_file=text_path,
+                summary=doc_data.get("summary", ""),
+                key_findings=doc_data.get("key_findings", []),
+                relevance_notes=doc_data.get("relevance_notes", "")
+            )
+            knowledge_base[ref_id] = ref_item
+            log_event("INFO", "Ingestion", f"Processed text: {Path(text_path).name}")
+        
+        # Save transcript
+        transcript_path = Path(transcripts_dir) / "ingestion_texts_batched.json"
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(transcript_path, 'w', encoding='utf-8') as f:
+            json.dump({"input": text_paths, "output": data}, f, indent=2)
+        
+        return knowledge_base
+        
+    except Exception as e:
+        log_event("ERROR", "Ingestion", f"Batched text ingestion failed: {str(e)}")
+        # Fallback: process individually
+        log_event("INFO", "Ingestion", "Falling back to individual text processing")
+        knowledge_base = {}
+        for i, text_path in enumerate(text_paths, start=ref_start_id):
+            ref_id = f"Ref_{i:03d}"
+            ref_item = ingest_text(text_path, client, ref_id, transcripts_dir, thinking_level)
+            knowledge_base[ref_id] = ref_item
+        return knowledge_base
+
+
 def load_raw_data(data_dir: str) -> Tuple[Dict[str, EvidenceItem], str]:
     """
-    Load CSV files and create data passports.
+    Load CSV files and create smart data passports.
     
-    A data passport includes:
-    - Column names and types
-    - First 50 rows as sample
-    - Basic statistics
+    A smart data passport includes:
+    - File metadata (rows, columns)
+    - Column names and data types
+    - Sample rows (10 rows, with long text truncated)
+    - Full statistics from describe()
+    
+    This provides structure visibility without context explosion from long text fields.
     
     Args:
         data_dir: Path to the raw_data directory
@@ -238,35 +490,72 @@ def load_raw_data(data_dir: str) -> Tuple[Dict[str, EvidenceItem], str]:
     evidence_items = {}
     passport_parts = []
     
+    # Configuration for smart passport
+    SAMPLE_ROWS = 10
+    MAX_TEXT_LENGTH = 100  # Truncate long text columns
+    
     # Process CSV files
     csv_files = list(data_path.glob("*.csv"))
     
     for i, csv_file in enumerate(csv_files):
         try:
             df = pd.read_csv(csv_file)
+            
+            # --- SANITIZATION START ---
+            # Strip whitespace from column names to avoid "New " vs "New" issues
+            original_cols = list(df.columns)
+            df.columns = df.columns.str.strip()
+            
+            # Check if cleaning happened
+            if list(df.columns) != original_cols:
+                log_event("INFO", "Ingestion", f"Sanitized column names in {csv_file.name} (stripped whitespace)")
+                
+                # Save cleaned version to ensure Analyst code reads clean data
+                # We prefix with 'clean_' to avoid overwriting original data
+                clean_filename = f"clean_{csv_file.name}"
+                clean_path = csv_file.parent / clean_filename
+                df.to_csv(clean_path, index=False)
+                
+                # Update reference to use the CLEAN file
+                csv_file = clean_path
+            # --- SANITIZATION END ---
             ev_id = f"ev_{i+1:03d}"
             
-            # Create data passport
+            # Create sample with truncated text columns
+            sample_df = df.head(SAMPLE_ROWS).copy()
+            for col in sample_df.columns:
+                if sample_df[col].dtype == 'object':
+                    # Truncate string columns
+                    sample_df[col] = sample_df[col].apply(
+                        lambda x: (str(x)[:MAX_TEXT_LENGTH] + '...') if isinstance(x, str) and len(str(x)) > MAX_TEXT_LENGTH else x
+                    )
+            
+            # Build data types info
+            dtypes_info = "\n".join([f"  - {col}: {dtype}" for col, dtype in df.dtypes.items()])
+            
+            # Create smart data passport
             passport = f"""
 === Data File: {csv_file.name} ===
-Rows: {len(df)}, Columns: {len(df.columns)}
-Columns: {', '.join(df.columns.tolist())}
+Shape: {len(df)} rows × {len(df.columns)} columns
 
-Sample (first 50 rows):
-{df.head(50).to_string()}
+Column Types:
+{dtypes_info}
+
+Sample Data ({SAMPLE_ROWS} rows, text truncated to {MAX_TEXT_LENGTH} chars):
+{sample_df.to_string()}
 
 Statistics:
-{df.describe().to_string()}
+{df.describe(include='all').to_string()}
 """
             passport_parts.append(passport)
             
             # Create evidence item
             evidence_items[ev_id] = EvidenceItem(
                 evidence_id=ev_id,
-                source_file=str(csv_file),
+                source_file=str(csv_file.resolve()),  # Use absolute path
                 description=f"Data from {csv_file.name}",
-                data_snippet=df.head(5).to_string(),
-                statistical_summary=df.describe().to_string()
+                data_snippet=sample_df.to_string(),
+                statistical_summary=df.describe(include='all').to_string()
             )
             
             log_event("INFO", "Ingestion", f"Loaded CSV: {csv_file.name} ({len(df)} rows)")
@@ -306,6 +595,46 @@ def load_user_draft(draft_dir: str) -> Optional[str]:
     return content
 
 
+def load_raw_context(raw_context_dir: str) -> str:
+    """
+    Load raw context files VERBATIM without AI summarization.
+    
+    This is for code, specifications, or other content that should
+    be passed directly to the writer without being processed by AI.
+    Files are concatenated with headers indicating their source.
+    
+    Args:
+        raw_context_dir: Path to inputs/raw_context
+        
+    Returns:
+        Concatenated content of all files with source headers
+    """
+    context_path = Path(raw_context_dir)
+    
+    if not context_path.exists():
+        log_event("INFO", "Ingestion", "No raw_context directory found (optional)")
+        return ""
+    
+    parts = []
+    supported_extensions = {'.txt', '.md', '.py', '.r', '.sql', '.json', '.yaml', '.yml', '.csv'}
+    
+    for file_path in sorted(context_path.iterdir()):
+        if file_path.is_file() and file_path.suffix.lower() in supported_extensions:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                parts.append(f"=== RAW CONTEXT: {file_path.name} ===\n{content}\n")
+                log_event("INFO", "Ingestion", f"Loaded raw context: {file_path.name} ({len(content)} chars)")
+            except Exception as e:
+                log_event("WARNING", "Ingestion", f"Failed to load raw context {file_path.name}: {e}")
+    
+    if parts:
+        log_event("INFO", "Ingestion", f"Loaded {len(parts)} raw context files")
+    
+    return "\n".join(parts)
+
+
 def ingest_all_references(
     references_dir: str,
     client: GeminiLLMClient,
@@ -315,9 +644,10 @@ def ingest_all_references(
     """
     Ingest all reference files from the references directory.
     
-    Routes files to appropriate handler:
-    - .pdf → ingest_pdf (Path A)
-    - .txt, .md → ingest_text (Path B)
+    Uses BATCHED ingestion to minimize API calls:
+    - All PDFs processed in 1 API call
+    - All text files processed in 1 API call
+    - Fallback to individual processing if batch fails
     
     Args:
         references_dir: Path to inputs/references
@@ -330,33 +660,93 @@ def ingest_all_references(
     """
     ref_path = Path(references_dir)
     knowledge_base = {}
-    ref_counter = 1
     
     # Get all reference files
-    pdf_files = list(ref_path.glob("*.pdf"))
-    txt_files = list(ref_path.glob("*.txt")) + list(ref_path.glob("*.md"))
+    pdf_files = [str(f) for f in ref_path.glob("*.pdf")]
+    txt_files = [str(f) for f in ref_path.glob("*.txt")] + [str(f) for f in ref_path.glob("*.md")]
     
     total_files = len(pdf_files) + len(txt_files)
     log_event("INFO", "Ingestion", f"Found {total_files} reference files to process")
     
-    # Process PDFs (Path A)
-    for pdf_file in pdf_files:
-        ref_id = f"Ref_{ref_counter:03d}"
-        ref_item = ingest_pdf(
-            str(pdf_file), client, ref_id, transcripts_dir, thinking_level
+    # Process PDFs (batched - 1 API call for all)
+    if pdf_files:
+        pdf_refs = ingest_pdfs_batched(
+            pdf_files, client, transcripts_dir, thinking_level
         )
-        knowledge_base[ref_id] = ref_item
-        ref_counter += 1
+        knowledge_base.update(pdf_refs)
     
-    # Process text files (Path B)
-    for txt_file in txt_files:
-        ref_id = f"Ref_{ref_counter:03d}"
-        ref_item = ingest_text(
-            str(txt_file), client, ref_id, transcripts_dir, thinking_level
+    # Process text files (batched - 1 API call for all)
+    if txt_files:
+        # Start ref IDs after PDFs
+        ref_start_id = len(pdf_files) + 1
+        txt_refs = ingest_texts_batched(
+            txt_files, client, transcripts_dir, ref_start_id, thinking_level
         )
-        knowledge_base[ref_id] = ref_item
-        ref_counter += 1
+        knowledge_base.update(txt_refs)
     
     log_event("INFO", "Ingestion", f"Completed ingestion of {len(knowledge_base)} references")
     
     return knowledge_base
+
+
+def load_instructions(inputs_dir: str) -> tuple[str, str]:
+    """
+    Load user guidance from inputs/user_instructions directory.
+    
+    Structure:
+    inputs/user_instructions/
+        stats_compute/  -> guidance_stats
+        figure_gen/     -> guidance_charts
+        
+    Each folder can contain multiple .txt or .md files.
+    """
+    from pathlib import Path
+    
+    base_path = Path(inputs_dir) / "user_instructions"
+    stats_path = base_path / "stats_compute"
+    charts_path = base_path / "figure_gen"
+    
+    guidance_stats = ""
+    guidance_charts = ""
+    
+    # helper to read all files in a dir
+    def read_dir(p: Path) -> str:
+        content = []
+        if p.exists() and p.is_dir():
+            for f in sorted(p.glob("*")):
+                if f.is_file() and f.suffix in ['.txt', '.md']:
+                    try:
+                        text = f.read_text(encoding="utf-8")
+                        content.append(f"--- FILE: {f.name} ---\n{text}")
+                    except Exception as e:
+                        log_event("WARNING", "Ingestion", f"Failed to read instruction file {f.name}: {e}")
+        return "\n\n".join(content)
+        
+    # Standard loading from folders
+    if base_path.exists():
+        guidance_stats = read_dir(stats_path)
+        guidance_charts = read_dir(charts_path)
+        
+    # Legacy fallback (optional, but good for stability during transition)
+    legacy_file = Path(inputs_dir) / "instructions.md"
+    if legacy_file.exists():
+        legacy_content = legacy_file.read_text(encoding="utf-8")
+        if not guidance_charts:
+            guidance_charts = legacy_content
+            log_event("INFO", "Ingestion", "Loaded legacy instructions.md as chart guidance")
+        else:
+            guidance_charts += "\n\n--- LEGACY instructions.md ---\n" + legacy_content
+            
+    # Log results
+    if guidance_stats:
+        log_event("INFO", "Ingestion", f"Loaded stats guidance ({len(guidance_stats)} chars)")
+    else:
+        log_event("INFO", "Ingestion", "No stats computation guidance found")
+        
+    if guidance_charts:
+        log_event("INFO", "Ingestion", f"Loaded chart guidance ({len(guidance_charts)} chars)")
+    else:
+        log_event("INFO", "Ingestion", "No chart generation guidance found")
+        
+    return guidance_stats, guidance_charts
+

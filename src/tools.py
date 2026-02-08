@@ -65,14 +65,17 @@ def execute_python_code(
         ExecutionResult with success status, output, errors, and created files
     """
     # Create output directory if needed
-    output_path = Path(output_dir)
+    output_path = Path(output_dir).resolve()  # Convert to absolute
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Inject paths and matplotlib config
+    # Ensure data_dir is also absolute
+    data_path = Path(data_dir).resolve()
+    
+    # Inject ABSOLUTE paths and matplotlib config
     path_injection = f'''
-# Path injection by AutoScholar
-DATA_DIR = r"{data_dir}"
-OUTPUT_DIR = r"{output_dir}"
+# Path injection by AutoScholar (ABSOLUTE paths)
+DATA_DIR = r"{data_path}"
+OUTPUT_DIR = r"{output_path}"
 '''
     
     # Combine preamble, paths, and user code

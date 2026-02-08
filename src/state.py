@@ -106,6 +106,11 @@ class PaperState(TypedDict, total=False):
     analysis_context: str
     figure_manifest: Dict[str, FigureItem]
     evidence_items: Dict[str, EvidenceItem]
+    raw_context: str  # Verbatim content from inputs/raw_context (code, specs, etc.)
+    raw_context_summary: str  # AI-analyzed summary of raw_context for reviewer/writer
+    computed_statistics: str  # Programmatically computed stats (ground truth for Writer/Reviewer)
+    guidance_stats: str       # User instructions for stats computation
+    guidance_charts: str      # User instructions for chart generation
     
     # --- PLANNING ---
     section_queue: List[str]
@@ -116,6 +121,7 @@ class PaperState(TypedDict, total=False):
     current_iteration: int
     previous_score: float
     critique_history: List[str]
+    completed_sections: Dict[str, str]  # section_name -> best_draft for coherence
     
     # --- METADATA ---
     mode: str
@@ -149,23 +155,30 @@ def create_initial_state(
         analysis_context="",
         figure_manifest={},
         evidence_items={},
+        raw_context="",
+        raw_context_summary="",
         
-        # Planning
+        # New: Granular Instructions
+        guidance_stats="",
+        guidance_charts="",
+        
+        # Planning - Methodology first to ground the paper in what we actually did
         section_queue=[
-            "Introduction",
-            "Literature Review", 
             "Methodology",
             "Results",
+            "Literature Review",
+            "Introduction",
             "Discussion",
             "Conclusion"
         ],
-        current_section="Introduction",
+        current_section="Methodology",
         
         # Iteration memory
         current_draft="",
         current_iteration=0,
         previous_score=0.0,
         critique_history=[],
+        completed_sections={},
         
         # Metadata
         mode=mode,

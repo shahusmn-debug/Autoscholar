@@ -11,10 +11,18 @@ This module provides a unified interface to Google's Gemini API with support for
 
 import os
 import mimetypes
-from typing import Any, Optional, Dict, List
+import time
+from typing import Any, Optional, Dict, List, Callable
 
 from google import genai
 from google.genai import types
+
+from .progress import log_event
+
+# Retry configuration for handling transient API errors
+MAX_RETRIES = 5
+RETRY_DELAY_BASE = 5  # seconds
+RETRYABLE_STATUS_CODES = [429, 503, 504]  # Rate limit, Unavailable, Gateway timeout
 
 
 class GeminiLLMClient:
@@ -74,6 +82,78 @@ class GeminiLLMClient:
         
         self.model_text = model_text
         self.model_vision = model_vision
+        self._call_counter = 0  # Track API calls for logging
+    
+    def _log_api_call(self, resp, call_type: str, model: str) -> None:
+        """
+        Log API call details including token usage.
+        
+        Args:
+            resp: The API response object
+            call_type: Type of call (text, vision, pdf)
+            model: The model used
+        """
+        self._call_counter += 1
+        call_id = self._call_counter
+        
+        # Extract usage metadata if available
+        try:
+            usage = resp.usage_metadata
+            prompt_tokens = getattr(usage, 'prompt_token_count', 0) or 0
+            output_tokens = getattr(usage, 'candidates_token_count', 0) or 0
+            total_tokens = getattr(usage, 'total_token_count', 0) or (prompt_tokens + output_tokens)
+            
+            log_event(
+                "INFO", "API",
+                f"Call #{call_id} [{call_type}] {model} | Tokens: {prompt_tokens} in, {output_tokens} out, {total_tokens} total"
+            )
+        except Exception:
+            # If usage metadata not available, log basic info
+            log_event("INFO", "API", f"Call #{call_id} [{call_type}] {model}")
+    
+    def _retry_api_call(self, api_call: Callable, call_type: str = "api") -> Any:
+        """
+        Execute an API call with retry logic for transient errors.
+        
+        Args:
+            api_call: A callable that makes the API request
+            call_type: Description of the call type for logging
+            
+        Returns:
+            The API response
+            
+        Raises:
+            The original exception if all retries fail
+        """
+        last_exception = None
+        
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                return api_call()
+            except Exception as e:
+                last_exception = e
+                error_str = str(e)
+                
+                # Check if this is a retryable error
+                is_retryable = any(
+                    str(code) in error_str 
+                    for code in RETRYABLE_STATUS_CODES
+                ) or "Empty response" in error_str
+                
+                if is_retryable and attempt < MAX_RETRIES:
+                    delay = RETRY_DELAY_BASE * (2 ** attempt)  # Exponential backoff
+                    log_event(
+                        "WARN", "API", 
+                        f"Retryable error on {call_type} (attempt {attempt + 1}/{MAX_RETRIES + 1}): "
+                        f"Waiting {delay}s before retry..."
+                    )
+                    time.sleep(delay)
+                else:
+                    # Not retryable or out of retries
+                    raise
+        
+        # Should not reach here, but just in case
+        raise last_exception
     
     def call_text(
         self,
@@ -105,12 +185,22 @@ class GeminiLLMClient:
             cfg.response_mime_type = "application/json"
             cfg.response_schema = response_schema
         
-        # Make the API call
-        resp = self.client_text.models.generate_content(
-            model=self.model_text,
-            contents=user_text,
-            config=cfg,
-        )
+        def make_request():
+            resp = self.client_text.models.generate_content(
+                model=self.model_text,
+                contents=user_text,
+                config=cfg,
+            )
+            # Validate inside retry loop - empty responses trigger retry
+            if not resp.text:
+                raise RuntimeError("Empty response from API - model returned no content")
+            return resp
+        
+        # Make the API call with retry logic
+        resp = self._retry_api_call(make_request, call_type="text")
+        
+        # Log the API call
+        self._log_api_call(resp, "text", self.model_text)
         
         return resp.text
     
@@ -171,12 +261,21 @@ class GeminiLLMClient:
             cfg.response_mime_type = "application/json"
             cfg.response_schema = response_schema
         
-        # Make the API call with vision client
-        resp = self.client_vision.models.generate_content(
-            model=self.model_vision,
-            contents=[types.Content(parts=parts)],
-            config=cfg,
-        )
+        def make_request():
+            resp = self.client_vision.models.generate_content(
+                model=self.model_vision,
+                contents=[types.Content(parts=parts)],
+                config=cfg,
+            )
+            if not resp.text:
+                raise RuntimeError("Empty response from API - model returned no content")
+            return resp
+
+        # Make the API call with vision client (with retry logic)
+        resp = self._retry_api_call(make_request, call_type="vision")
+        
+        # Log the API call
+        self._log_api_call(resp, "vision", self.model_vision)
         
         return resp.text
     
@@ -233,11 +332,81 @@ class GeminiLLMClient:
             cfg.response_mime_type = "application/json"
             cfg.response_schema = response_schema
         
-        # Make the API call with the uploaded file
-        resp = self.client_text.models.generate_content(
-            model=self.model_text,
-            contents=[uploaded, user_text],
-            config=cfg,
+        def make_request():
+            resp = self.client_text.models.generate_content(
+                model=self.model_text,
+                contents=[uploaded, user_text],
+                config=cfg,
+            )
+            if not resp.text:
+                raise RuntimeError("Empty response from API - model returned no content")
+            return resp
+
+        # Make the API call with the uploaded file (with retry logic)
+        resp = self._retry_api_call(make_request, call_type="pdf")
+        
+        # Log the API call
+        self._log_api_call(resp, "pdf", self.model_text)
+        
+        return resp.text
+    
+    def call_multi_pdf_via_files_api(
+        self,
+        system_prompt: str,
+        user_text: str,
+        pdf_paths: List[str],
+        thinking_level: str = "high",
+        response_schema: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Process multiple PDF documents in a single API call.
+        
+        This method uploads all PDFs first, then includes them all in one
+        generation request. This saves API calls when processing multiple PDFs.
+        
+        Args:
+            system_prompt: The system instruction
+            user_text: The user's query about the PDFs
+            pdf_paths: List of paths to PDF files
+            thinking_level: Chain-of-thought depth
+            response_schema: Optional JSON schema for structured output
+            
+        Returns:
+            The generated response text
+        """
+        # Upload all PDF files first
+        uploaded_files = []
+        for pdf_path in pdf_paths:
+            uploaded = self.upload_file(pdf_path)
+            uploaded_files.append(uploaded)
+        
+        # Build configuration
+        cfg = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            thinking_config=types.ThinkingConfig(thinking_level=thinking_level),
         )
+        
+        if response_schema is not None:
+            cfg.response_mime_type = "application/json"
+            cfg.response_schema = response_schema
+        
+        # Build contents: all uploaded files + the user text
+        contents = uploaded_files + [user_text]
+        
+        def make_request():
+            resp = self.client_text.models.generate_content(
+                model=self.model_text,
+                contents=contents,
+                config=cfg,
+            )
+            if not resp.text:
+                raise RuntimeError("Empty response from API - model returned no content")
+            return resp
+
+        # Make the API call with all files (with retry logic)
+        resp = self._retry_api_call(make_request, call_type="multi_pdf")
+        
+        # Log the API call
+        self._log_api_call(resp, "multi_pdf", self.model_text)
         
         return resp.text

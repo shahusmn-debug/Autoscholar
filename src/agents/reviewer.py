@@ -32,15 +32,18 @@ SCORING CRITERIA (0.0 - 10.0):
 - 0.0-3.9: Fundamental issues, not acceptable
 
 EVALUATION CHECKLIST:
-1. ACCURACY: Do claims match the analysis_context (data ground truth)?
+1. EVIDENCE SUPPORT: Are the claims made supported by the analysis_context?
+   - Note: The paper does NOT need to include all available data, only what is relevant.
 2. CITATIONS: Are references properly cited with [Ref_XXX] format?
-3. CLARITY: Is the writing clear and well-organized?
+3. CLARITY: Is the writing clear, well-organized, and compelling?
 4. COMPLETENESS: Is the section thorough for its type?
 5. ACADEMIC TONE: Is the tone appropriate for publication?
-6. EVIDENCE: Are claims supported by data or citations?
+6. SELECTIVITY: Did the author choose the most relevant evidence to tell a coherent story?
 
-GROUND TRUTH RULE: If the draft makes claims that contradict the analysis_context,
-this is a CRITICAL error. The data analysis is the source of truth.
+GROUND TRUTH RULE: Claims must NOT contradict the analysis_context. However, interpretation of the data and omission of irrelevant details is encouraged.
+
+EVIDENCE-ONLY RULE: Do NOT assume or infer details that are not EXPLICITLY stated in the 
+provided evidence.
 
 FEEDBACK REQUIREMENTS:
 - Be specific about issues (cite line/paragraph)
@@ -84,6 +87,7 @@ def node_reviewer(state: PaperState, client: GeminiLLMClient, config: dict) -> P
     
     # Build context
     analysis_context = state.get("analysis_context", "No analysis available.")
+    raw_context_summary = state.get("raw_context_summary", "No raw context summary available.")
     
     # Build knowledge base summary
     kb_parts = []
@@ -117,6 +121,9 @@ def node_reviewer(state: PaperState, client: GeminiLLMClient, config: dict) -> P
 
 ## Data Analysis (GROUND TRUTH):
 {analysis_context}
+
+## Methodology Context (from code/specs):
+{raw_context_summary}
 
 ## Available References:
 {knowledge_summary}
@@ -157,6 +164,19 @@ Please evaluate this draft and provide a score (0.0-10.0) with detailed feedback
     if score > state.get("best_score_so_far", 0.0):
         state["best_score_so_far"] = score
         state["best_draft_so_far"] = draft
+        
+        # Eagerly save validation/best draft to disk to prevent data loss
+        # especially for the final section where update_state might behave differently
+        from ..utils import get_section_dir
+        run_dir = state.get("run_dir", "runs/default")
+        section_dir = Path(get_section_dir(run_dir, section))
+        best_draft_file = section_dir / "best_draft.md"
+        try:
+            with open(best_draft_file, "w", encoding="utf-8") as f:
+                f.write(f"<!-- Best Score: {score:.1f} -->\n\n{draft}")
+            log_event("INFO", "Reviewer", f"New best score ({score:.1f})! Saved best_draft.md")
+        except Exception as e:
+            log_event("WARNING", "Reviewer", f"Failed to save best_draft.md: {e}")
     
     # Save critique to disk
     from ..utils import save_iteration_draft
@@ -166,7 +186,7 @@ Please evaluate this draft and provide a score (0.0-10.0) with detailed feedback
     return state
 
 
-def should_continue(state: PaperState, config: dict) -> str:
+def should_continue(state: PaperState, config: dict, log_decision: bool = False) -> str:
     """
     Router logic to decide next action after review.
     
@@ -175,11 +195,15 @@ def should_continue(state: PaperState, config: dict) -> str:
     - "next": Move to next section
     - "end": All sections complete
     
-    Logic:
-    1. Score >= 9.5 → next section
-    2. Iteration < 2 → retry (mandatory minimum)
-    3. Iteration >= 6 → next section (hard max)
-    4. Score < previous → retry (improve more)
+    Decision Logic (simple):
+    1. Score >= threshold AND iteration >= min → next section (quality met)
+    2. Iteration >= max → next section (use best draft)
+    3. Otherwise → retry (keep iterating)
+    
+    Args:
+        state: Current pipeline state
+        config: Configuration dict
+        log_decision: If True, log the decision reason. Only set True from one call site.
     """
     score = state.get("previous_score", 0.0)
     iteration = state.get("current_iteration", 0)
@@ -187,33 +211,32 @@ def should_continue(state: PaperState, config: dict) -> str:
     current_section = state.get("current_section", "")
     
     limits = config.get("iteration_limits", {})
-    min_iter = limits.get("min", 2)
-    max_iter = limits.get("max", 6)
-    threshold = limits.get("score_threshold", 9.5)
+    min_iter = limits.get("min", 1)
+    max_iter = limits.get("max", 4)
+    threshold = limits.get("score_threshold", 9.0)
     
-    # Check if we've hit the quality threshold
-    if score >= threshold and iteration >= min_iter:
-        # Move to next section
-        if current_section in section_queue:
-            idx = section_queue.index(current_section)
-            if idx + 1 < len(section_queue):
-                return "next"
-            else:
-                return "end"
-        return "end"
-    
-    # Mandatory minimum iterations
-    if iteration < min_iter:
-        return "retry"
-    
-    # Hard maximum
-    if iteration >= max_iter:
-        log_event("WARNING", "Reviewer", f"Hit max iterations ({max_iter}) for {current_section}")
+    def move_to_next_or_end():
+        """Helper to determine if we go to next section or end."""
         if current_section in section_queue:
             idx = section_queue.index(current_section)
             if idx + 1 < len(section_queue):
                 return "next"
         return "end"
     
-    # Keep trying to improve
+    # 1. Check if we've hit the quality threshold
+    # Note: iteration is 0-indexed, so iteration 0 = "completed 1 iteration"
+    completed_iterations = iteration + 1
+    if score >= threshold and completed_iterations >= min_iter:
+        if log_decision:
+            log_event("INFO", "Reviewer", f"Quality threshold {threshold} met for {current_section}")
+        return move_to_next_or_end()
+    
+    # 2. Hard maximum - stop and use best draft
+    if completed_iterations >= max_iter:
+        if log_decision:
+            log_event("WARNING", "Reviewer", f"Hit max iterations ({max_iter}) for {current_section}. Using best draft.")
+        return move_to_next_or_end()
+    
+    # 3. Keep iterating
     return "retry"
+

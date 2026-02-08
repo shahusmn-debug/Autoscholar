@@ -109,3 +109,31 @@ Improve your existing paper:
 ## License
 
 MIT
+
+## Proof of Concept: Titanic Survival Analysis
+
+To demonstrate AutoScholar's capabilities, we ran it on the classic **Titanic dataset** from Kaggle (`Titanic-Dataset.csv`). The goal was to identify the primary factors traversing survival probability.
+
+**AutoScholar automatically:**
+1.  Ingested the raw CSV data.
+2.  Formulated hypotheses about gender, class, and age.
+3.  Wrote Python code to generate visualizations and statistical tests.
+4.  Drafted a full research paper interpreting the results.
+
+### Key Findings
+*   **"Women and Children First"**: Gender was the strongest predictor ($p < 0.001$), with female survival at **74.2%** vs. male survival at **18.9%**.
+*   **Class Divides**: 1st Class passengers had a **63%** survival rate, compared to just **24.2%** for 3rd Class.
+*   **Complex Interactions**: The "women first" rule was heavily stratified by class. 3rd class men had the lowest survival chance (<20%).
+
+### Generated Visualizations
+
+**Survival by Class and Gender**
+*Shows that while women had an advantage, class acted as a powerful multiplier.*
+![Survival by Class and Gender](examples/titanic_analysis/fig_survival_pclass_sex_interaction.png)
+
+**Age Distribution**
+*Shows a clear priority for saving infants and toddlers (spike in survival density on the left).*
+![Age Distribution](examples/titanic_analysis/fig_age_distribution_survival.png)
+
+[📄 **Read the Full Generated Paper**](examples/titanic_analysis/Titanic_Paper.md) | [📂 **View All Figures**](examples/titanic_analysis/)
+
